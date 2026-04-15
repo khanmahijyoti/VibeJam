@@ -118,8 +118,12 @@ class PlayroomService {
     }
 
     getMyPlayer() {
-        if (this.sdk && typeof this.sdk.myPlayer === 'function') {
-            return this.sdk.myPlayer();
+        if (this.sdk) {
+            if (typeof this.sdk.myPlayer === 'function') {
+                return this.sdk.myPlayer();
+            } else if (typeof this.sdk.me === 'function') {
+                return this.sdk.me();
+            }
         }
 
         if (!this.localFallbackPlayers.has('local')) {
@@ -129,8 +133,12 @@ class PlayroomService {
     }
 
     getPlayers() {
-        if (this.sdk && typeof this.sdk.getPlayers === 'function') {
-            return this.sdk.getPlayers() || [];
+        if (this.sdk) {
+            if (typeof this.sdk.getPlayers === 'function') {
+                return this.sdk.getPlayers() || [];
+            } else if (typeof this.sdk.getParticipants === 'function') {
+                return this.sdk.getParticipants() || [];
+            }
         }
 
         return Array.from(this.localFallbackPlayers.values());
