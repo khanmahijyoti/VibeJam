@@ -67,11 +67,13 @@ export class MenuScene extends Phaser.Scene {
         this.subtitleText.setText('Select Game Mode');
 
         this.panelContainer.add(this.createButton(this.width * 0.5, this.height * 0.5, 'Single Player', () => {
+            console.log('[MenuScene] SINGLE PLAYER clicked');
             setGameMode(GAME_MODES.SINGLE);
             this.scene.start('Start');
         }));
 
         this.panelContainer.add(this.createButton(this.width * 0.5, this.height * 0.63, 'Co-op', () => {
+            console.log('[MenuScene] CO-OP clicked');
             setGameMode(GAME_MODES.COOP);
             clearCoopState();
             this.showCoopMenu();
@@ -84,10 +86,12 @@ export class MenuScene extends Phaser.Scene {
         this.subtitleText.setText('Co-op Lobby Options');
 
         this.panelContainer.add(this.createButton(this.width * 0.5, this.height * 0.48, 'Create Lobby', () => {
+            console.log('[MenuScene] CREATE LOBBY clicked');
             this.startCoopSession(COOP_ACTIONS.CREATE, '', this.subtitleText);
         }));
 
         this.panelContainer.add(this.createButton(this.width * 0.5, this.height * 0.58, 'Join with Code', () => {
+            console.log('[MenuScene] JOIN WITH CODE clicked');
             this.openJoinWithCode();
         }));
 
@@ -220,6 +224,8 @@ export class MenuScene extends Phaser.Scene {
         if (this.coopBusy) return;
         this.coopBusy = true;
 
+        console.log('[MenuScene.startCoopSession] Initializing co-op:', { action, roomCode });
+
         if (statusText) {
             statusText.setText('Opening Playroom lobby...');
         }
@@ -232,7 +238,10 @@ export class MenuScene extends Phaser.Scene {
                 maxPlayers: 4
             });
 
+            console.log('[MenuScene.startCoopSession] Lobby init result:', result);
+
             if (result && result.fallback) {
+                console.warn('[MenuScene.startCoopSession] Playroom unavailable, using fallback');
                 if (statusText) {
                     statusText.setText('Playroom unavailable on this device');
                 }
@@ -242,6 +251,7 @@ export class MenuScene extends Phaser.Scene {
             if (action === COOP_ACTIONS.CREATE) {
                 const resolvedCode = (result && result.roomCode) ? result.roomCode : '------';
                 setRoomCode(resolvedCode);
+                console.log('[MenuScene.startCoopSession] CREATE action, resolved code:', resolvedCode);
                 this.scene.start('Start');
                 return;
             }
@@ -250,9 +260,10 @@ export class MenuScene extends Phaser.Scene {
                 statusText.setText('Connected. Starting game...');
             }
 
+            console.log('[MenuScene.startCoopSession] JOIN action, starting scene');
             this.scene.start('Start');
         } catch (error) {
-            console.warn('[MenuScene] Failed to initialize co-op lobby', error);
+            console.error('[MenuScene] Failed to initialize co-op lobby', error);
             if (statusText) {
                 statusText.setText('Could not open lobby. Please try again.');
             }

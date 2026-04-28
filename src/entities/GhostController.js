@@ -22,6 +22,10 @@ export class GhostController {
         this.lastDetuneAt = 0;
         this.ghostWallCollider = null;
         this.ghostAwake = false;
+        
+        // For tracking ghost updates for broadcast in co-op
+        this._lastBroadcastTime = 0;
+        this._broadcastInterval = 100; // Broadcast every 100ms
     }
 
     setup() {
@@ -88,6 +92,11 @@ export class GhostController {
     updateAI() {
         if (!this.ghost || !this.ghost.room) return;
 
+        // In co-op mode, only the host runs ghost AI
+        if (this.scene.isCoopMode && this.scene.playroomService && !this.scene.playroomService.isHost()) {
+            return;
+        }
+
         if (!this.ghostAwake) {
             if (this.isPlayerInsideHouse()) {
                 this.ghostAwake = true;
@@ -106,35 +115,53 @@ export class GhostController {
             this.ghost.state !== 'HUNT'
             && this.ghost.state !== 'EVENT'
             && this.falseHuntCooldown <= 0
-            && this.scene.sanity < 75
-            && Math.random() < 0.02
         ) {
-            this.triggerFalseHunt();
+            // In co-op mode, use average sanity; otherwise use local sanity
+            const falseHuntSanity = this.scene.sanitySystem.getAverageTeamSanity();
+            
+            if (falseHuntSanity < 75 && Math.random() < 0.02) {
+                this.triggerFalseHunt();
+            }
         }
 
-        if (this.ghost.state !== 'HUNT' && this.ghost.huntCooldown <= 0 && this.scene.sanity < 50) {
-            const huntChance = this.scene.sanity < 25 ? 0.08 : 0.03;
-            if (Math.random() < huntChance) {
-                this.ghost.state = 'HUNT';
-                this.ghost.stateTimer = Phaser.Math.Between(15, 25);
-                this.ghost.targetX = this.ghost.x;
-                this.ghost.targetY = this.ghost.y;
-                this.ghost.lastKnownPlayerPos = null;
-                this.behaviorDelayTicks = 0;
+        if (this.ghost.state !== 'HUNT' && this.ghost.huntCooldown <= 0) {
+            // In co-op mode, use average sanity; otherwise use local sanity
+            const triggerSanity = this.scene.sanitySystem.getAverageTeamSanity();
+            
+            // Hunt only triggers when average sanity drops below 30%
+            if (triggerSanity < 30) {
+                const huntChance = triggerSanity < 15 ? 0.08 : 0.03;
+                if (Math.random() < huntChance) {
+                    this.ghost.state = 'HUNT';
+                    this.ghost.stateTimer = Phaser.Math.Between(15, 25);
+                    this.ghost.targetX = this.ghost.x;
+                    this.ghost.targetY = this.ghost.y;
+                    this.ghost.lastKnownPlayerPos = null;
+                    this.behaviorDelayTicks = 0;
 
-                // An EMF level 4 reading is created at the ghost's position where it started a hunt.
-                this.scene.evidenceSystem.createEmfSource(
-                    this.ghost.x,
-                    this.ghost.y,
-                    4,
-                    this.ghost.floorIndex,
-                    20000
-                );
+                    // An EMF level 4 reading is created at the ghost's position where it started a hunt.
+                    this.scene.evidenceSystem.createEmfSource(
+                        this.ghost.x,
+                        this.ghost.y,
+                        4,
+                        this.ghost.floorIndex,
+                        20000
+                    );
 
-                this.scene.interactionSystem.setHuntMode(true);
-                this.scene.audioSystem.playSfx('hunt-start');
-                this.scene.audioSystem.playLoop('hunt-loop');
-                return;
+                    this.scene.interactionSystem.setHuntMode(true);
+                    this.scene.audioSystem.playSfx('hunt-start');
+                    this.scene.audioSystem.playLoop('hunt-loop');
+                    
+                    // Broadcast hunt start to all players
+                    if (this.scene.playroomService) {
+                        this.scene.playroomService.callRPC('huntStarted', {
+                            ghostX: this.ghost.x,
+                            ghostY: this.ghost.y,
+                            averageSanity: triggerSanity
+                        });
+                    }
+                    return;
+                }
             }
         }
 
@@ -146,11 +173,14 @@ export class GhostController {
         let interactionChance = 0.15;
         let manifestChance = 0.02;
 
-        if (this.scene.sanity !== undefined) {
-            if (this.scene.sanity > 70) {
+        // In co-op mode, use average sanity; otherwise use local sanity
+        const behaviorSanity = this.scene.sanitySystem.getAverageTeamSanity();
+
+        if (behaviorSanity !== undefined) {
+            if (behaviorSanity > 70) {
                 interactionChance = 0.05;
                 manifestChance = 0.01;
-            } else if (this.scene.sanity > 30) {
+            } else if (behaviorSanity > 30) {
                 interactionChance = 0.15;
                 manifestChance = 0.03;
             } else {
@@ -186,6 +216,19 @@ export class GhostController {
 
     updateMovement() {
         if (!this.ghost || !this.ghost.room) return;
+
+        if (this.scene.isCoopMode && this.scene.playroomService && !this.scene.playroomService.isHost()) {
+            this.ghostAwake = true;
+            if (this.ghostVisual?.body) {
+                this.ghostVisual.body.setVelocity(0, 0);
+            }
+            if (this.ghostVisual) {
+                this.ghostVisual.setPosition(this.ghost.x, this.ghost.y);
+            }
+            this.applyGhostFlicker();
+            this.updatePresenceEffects();
+            return;
+        }
 
         if (!this.ghostAwake) {
             this.keepGhostDormant();
@@ -246,6 +289,9 @@ export class GhostController {
         this.ghost.y = this.ghostVisual.y;
         this.applyGhostFlicker();
         this.updatePresenceEffects();
+        
+        // Broadcast ghost state periodically in co-op mode
+        this.broadcastGhostState();
     }
 
     updateHuntState() {
@@ -818,5 +864,31 @@ export class GhostController {
         }
 
         return null;
+    }
+
+    broadcastGhostState() {
+        // Only broadcast from host in co-op mode
+        if (!this.scene.isCoopMode || !this.scene.playroomService || !this.scene.playroomService.isHost()) {
+            return;
+        }
+
+        const now = Date.now();
+        if (now - this._lastBroadcastTime < this._broadcastInterval) {
+            return;
+        }
+
+        this._lastBroadcastTime = now;
+
+        if (!this.ghost) return;
+
+        // Broadcast ghost state to all clients
+        this.scene.playroomService.callRPC('ghostUpdate', {
+            x: this.ghost.x,
+            y: this.ghost.y,
+            state: this.ghost.state,
+            floorIndex: this.ghost.floorIndex,
+            huntCooldown: this.ghost.huntCooldown,
+            stateTimer: this.ghost.stateTimer
+        });
     }
 }

@@ -4,24 +4,25 @@ export class WorldBuilder {
     }
 
     buildWorld() {
-        this.scene.currentFloorIndex = 0;
-        this.scene.staticWallSegments = [];
-        this.scene.doors = [];
-        this.scene.switches = [];
-        this.scene.equipmentPickups = [];
-        this.scene.rooms = [];
-        this.scene.furniture = [];
-        this.scene.fingerprints = [];
-        this.scene.stairs = [];
-        this.scene.nextDoorId = 0;
-        this.scene.nextSwitchId = 0;
-
-        this.scene.vanBounds = { x: 620, y: 1080, w: 500, h: 100 };
-        this.scene.vanSpawn = { x: 820, y: 1130 };
-
-        this.buildFloor(0);
-        this.scene.switchFloor(0);
-    }
+         this.scene.currentFloorIndex = 0;
+         this.scene.staticWallSegments = [];
+         this.scene.doors = [];
+         this.scene.switches = [];
+         this.scene.equipmentPickups = [];
+         this.scene.rooms = [];
+         this.scene.furniture = [];
+         this.scene.fingerprints = [];
+         this.scene.stairs = [];
+         this.scene.nextDoorId = 0;
+         this.scene.nextSwitchId = 0;
+         this.scene.nextEquipmentId = 0;
+ 
+         this.scene.vanBounds = { x: 620, y: 1080, w: 500, h: 100 };
+         this.scene.vanSpawn = { x: 820, y: 1130 };
+ 
+         this.buildFloor(0);
+         this.scene.switchFloor(0);
+     }
 
     buildFloor(floorIndex) {
         this.scene.staticWallSegments.push(
@@ -105,7 +106,7 @@ export class WorldBuilder {
             { name: 'garage', bounds: { x: 450, y: 700, w: 650, h: 350 }, isLit: false, floorIndex }
         );
 
-        this.createDoor(360, 1050, 80, 20, 0, 0.5, floorIndex);
+        this.createDoor(360, 1050, 80, 20, 0, 0.5, floorIndex, { isMainExitDoor: true });
         this.createDoor(150, 200, 50, 20, 0, 0.5, floorIndex);
         this.createDoor(280, 200, 50, 20, 0, 0.5, floorIndex);
         this.createDoor(350, 400, 20, 50, 0.5, 0, floorIndex);
@@ -167,7 +168,7 @@ export class WorldBuilder {
         }).setOrigin(0.5).setDepth(90);
     }
 
-    createEquipmentPickup(x, y, itemDef, floorIndex = 0) {
+    createEquipmentPickup(x, y, itemDef, floorIndex = 0, networkId = null) {
         const normalizedItemDef = {
             id: itemDef.id,
             displayName: itemDef.displayName,
@@ -200,7 +201,10 @@ export class WorldBuilder {
         label.setDepth(92);
         label.floorIndex = floorIndex;
 
-        this.scene.equipmentPickups.push({
+        // Use provided networkId or generate a new one
+        const finalNetworkId = networkId || `item_${floorIndex}_${this.scene.nextEquipmentId++}`;
+
+        const pickup = {
             x,
             y,
             floorIndex,
@@ -211,11 +215,14 @@ export class WorldBuilder {
             visual: body,
             label,
             picked: false,
-            networkId: `item_${floorIndex}_${this.scene.nextEquipmentId++}`
-        });
+            networkId: finalNetworkId
+        };
+
+        this.scene.equipmentPickups.push(pickup);
+        return pickup;
     }
 
-    createDoor(x, y, w, h, pivotX = 0, pivotY = 0.5, floorIndex = 0) {
+    createDoor(x, y, w, h, pivotX = 0, pivotY = 0.5, floorIndex = 0, options = {}) {
         const visual = this.scene.add.rectangle(x, y, w, h, 0x5a3a22);
         visual.setOrigin(pivotX, pivotY);
 
@@ -229,6 +236,7 @@ export class WorldBuilder {
         visual.collider = collider;
         visual.isOpen = false;
         visual.isLocked = false;
+        visual.isMainExitDoor = options.isMainExitDoor === true;
         visual.floorIndex = floorIndex;
         visual.networkId = `door_${floorIndex}_${this.scene.nextDoorId++}`;
         collider.floorIndex = floorIndex;

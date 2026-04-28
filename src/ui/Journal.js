@@ -162,6 +162,22 @@ export class Journal {
         
         this.selectedGhost = ghost;
         
+        // Broadcast ghost selection to other players in co-op mode
+        if (this.scene.isCoopMode && this.scene.playroomService) {
+            this.scene.playroomService.callRPC('playerGhostSelected', {
+                playerId: this.scene.playroomService.getMyPlayerId(),
+                ghostName: this.guessedGhost ? this.guessedGhost.name : null
+            });
+            
+            // Update local tracking
+            if (this.guessedGhost) {
+                this.scene.playroomService.setPlayerGhostSelection(
+                    this.scene.playroomService.getMyPlayerId(),
+                    this.guessedGhost.name
+                );
+            }
+        }
+        
         this.updateGhostListFilter();
 
         this.detailsTitle.setText(ghost.name);

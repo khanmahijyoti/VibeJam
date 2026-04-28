@@ -15,6 +15,9 @@ class PlayroomService {
             evidenceEvents: [],
             sanityByPlayer: {}
         };
+        
+        // Track ghost type selections per player
+        this.playerGhostSelections = new Map();
     }
 
     async initLobby(options = {}) {
@@ -31,9 +34,17 @@ class PlayroomService {
         this.reset();
 
         await this.ensureSdk();
+        
         this.bindRpcHandlers();
 
-        if (!this.sdk || typeof this.sdk.insertCoin !== 'function') {
+        // Get insertCoin from either direct or default export
+        let insertCoinFunc = this.sdk?.insertCoin;
+        if (!insertCoinFunc && this.sdk?.default) {
+            insertCoinFunc = this.sdk.default.insertCoin;
+        }
+        
+        if (!insertCoinFunc || typeof insertCoinFunc !== 'function') {
+            console.warn('[PlayroomService.initLobby] SDK not available, using FALLBACK');
             this.initialized = true;
             return { ok: true, fallback: true, roomCode };
         }
@@ -53,7 +64,7 @@ class PlayroomService {
             coinConfig.roomCode = roomCode;
         }
 
-        await this.sdk.insertCoin(coinConfig);
+        await insertCoinFunc(coinConfig);
         this.initialized = true;
 
         const resolvedCode = this.getRoomCodeFromSdk() || roomCode;
@@ -69,7 +80,9 @@ class PlayroomService {
     }
 
     async ensureSdk() {
-        if (this.sdk) return this.sdk;
+        if (this.sdk) {
+            return this.sdk;
+        }
 
         if (window.PlayroomKit) {
             this.sdk = window.PlayroomKit;
@@ -79,8 +92,9 @@ class PlayroomService {
         try {
             const mod = await import('https://cdn.jsdelivr.net/npm/playroomkit@latest/+esm');
             this.sdk = mod;
+            return this.sdk;
         } catch (error) {
-            console.warn('[PlayroomService] Playroom SDK load failed, using fallback mode.', error);
+            console.warn('[PlayroomService.ensureSdk] CDN import FAILED', error);
             this.sdk = null;
         }
 
@@ -107,44 +121,208 @@ class PlayroomService {
     }
 
     isHost() {
-        if (this.sdk && typeof this.sdk.isHost === 'function') {
-            return !!this.sdk.isHost();
+        if (this.sdk) {
+            // Try primary method
+            if (typeof this.sdk.isHost === 'function') {
+                return !!this.sdk.isHost();
+            }
+            // Try alternative method
+            if (typeof this.sdk.amIHost === 'function') {
+                return !!this.sdk.amIHost();
+            }
+            // Try default export
+            if (this.sdk.default) {
+                if (typeof this.sdk.default.isHost === 'function') {
+                    return !!this.sdk.default.isHost();
+                }
+                if (typeof this.sdk.default.amIHost === 'function') {
+                    return !!this.sdk.default.amIHost();
+                }
+            }
         }
 
         const me = this.getMyPlayer();
         if (me && me.isHost === true) return true;
 
-        return true;
+        const modeState = getModeState();
+        if (modeState.coopAction === COOP_ACTIONS.JOIN) return false;
+        if (modeState.coopAction === COOP_ACTIONS.CREATE) return true;
+
+        return this.getPlayerCount() <= 1;
     }
 
     getMyPlayer() {
-        if (this.sdk && typeof this.sdk.myPlayer === 'function') {
-            return this.sdk.myPlayer();
+        if (this.sdk) {
+            // Try primary method names
+            if (typeof this.sdk.myPlayer === 'function') {
+                return this.sdk.myPlayer();
+            }
+            // Try alternative method name used in some versions
+            if (typeof this.sdk.me === 'function') {
+                return this.sdk.me();
+            }
+            // Try default export
+            if (this.sdk.default) {
+                if (typeof this.sdk.default.myPlayer === 'function') {
+                    return this.sdk.default.myPlayer();
+                }
+                if (typeof this.sdk.default.me === 'function') {
+                    return this.sdk.default.me();
+                }
+            }
         }
 
         if (!this.localFallbackPlayers.has('local')) {
-            this.localFallbackPlayers.set('local', { id: 'local', state: {} });
+            this.localFallbackPlayers.set('local', { id: 'local', state: {}, setState: () => {}, getState: () => ({}) });
         }
         return this.localFallbackPlayers.get('local');
     }
 
     getPlayers() {
-        if (this.sdk && typeof this.sdk.getPlayers === 'function') {
-            return this.sdk.getPlayers() || [];
+        if (this.sdk) {
+            // Try primary method name
+            if (typeof this.sdk.getPlayers === 'function') {
+                const players = this.sdk.getPlayers() || [];
+                
+                // Debug log every 120 frames to see if player list changes
+                if (!this._getPlayers_frameCount) this._getPlayers_frameCount = 0;
+                this._getPlayers_frameCount++;
+                if (this._getPlayers_frameCount % 120 === 0) {
+                    console.log('[PlayroomService.getPlayers] SDK.getPlayers() returned:', players.length, 'players');
+                }
+                
+                return players;
+            }
+
+            // Try alternative method name used in some versions
+            if (typeof this.sdk.getParticipants === 'function') {
+                const players = this.sdk.getParticipants() || [];
+                
+                if (!this._getPlayers_frameCount) this._getPlayers_frameCount = 0;
+                this._getPlayers_frameCount++;
+                if (this._getPlayers_frameCount % 120 === 0) {
+                    console.log('[PlayroomService.getPlayers] SDK.getParticipants() returned:', players.length, 'players');
+                }
+                
+                return players;
+            }
+
+            // Try default export
+            if (this.sdk.default) {
+                if (typeof this.sdk.default.getPlayers === 'function') {
+                    const players = this.sdk.default.getPlayers() || [];
+                    
+                    if (!this._getPlayers_frameCount) this._getPlayers_frameCount = 0;
+                    this._getPlayers_frameCount++;
+                    if (this._getPlayers_frameCount % 120 === 0) {
+                        console.log('[PlayroomService.getPlayers] SDK.default.getPlayers() returned:', players.length, 'players');
+                    }
+                    
+                    return players;
+                }
+
+                if (typeof this.sdk.default.getParticipants === 'function') {
+                    const players = this.sdk.default.getParticipants() || [];
+                    
+                    if (!this._getPlayers_frameCount) this._getPlayers_frameCount = 0;
+                    this._getPlayers_frameCount++;
+                    if (this._getPlayers_frameCount % 120 === 0) {
+                        console.log('[PlayroomService.getPlayers] SDK.default.getParticipants() returned:', players.length, 'players');
+                    }
+                    
+                    return players;
+                }
+            }
         }
 
-        return Array.from(this.localFallbackPlayers.values());
+        const fallback = Array.from(this.localFallbackPlayers.values());
+        if (!this._getPlayers_frameCount) this._getPlayers_frameCount = 0;
+        this._getPlayers_frameCount++;
+        if (this._getPlayers_frameCount % 120 === 0) {
+            console.log('[PlayroomService.getPlayers] Using fallback, returning:', fallback.length, 'players');
+        }
+        return fallback;
+    }
+
+    getPlayerCount() {
+        return this.getPlayers().length;
+    }
+
+    getMaxPlayers() {
+        // Try to get maxPlayers from SDK
+        if (this.sdk?.getMaxPlayers && typeof this.sdk.getMaxPlayers === 'function') {
+            return this.sdk.getMaxPlayers();
+        }
+        if (this.sdk?.default?.getMaxPlayers && typeof this.sdk.default.getMaxPlayers === 'function') {
+            return this.sdk.default.getMaxPlayers();
+        }
+        // Default to 4 if we can't get from SDK
+        return 4;
+    }
+
+    isLobbyFull() {
+        return this.getPlayerCount() >= this.getMaxPlayers();
+    }
+
+    setPlayerGhostSelection(playerId, ghostType) {
+        this.playerGhostSelections.set(playerId, ghostType);
+    }
+
+    getPlayerGhostSelection(playerId) {
+        return this.playerGhostSelections.get(playerId) || null;
+    }
+
+    allPlayersHaveSelectedGhost() {
+        const players = this.getPlayers();
+        
+        // Check if each player has a ghost selection
+        for (const player of players) {
+            const playerId = player.id || player.playerId || 'unknown';
+            const ghostSelection = this.getPlayerGhostSelection(playerId);
+            
+            if (!ghostSelection) {
+                return false;
+            }
+        }
+        
+        return true;
+    }
+
+    getMissingGhostSelections() {
+        const players = this.getPlayers();
+        const missing = [];
+        
+        for (const player of players) {
+            const playerId = player.id || player.playerId || 'unknown';
+            const ghostSelection = this.getPlayerGhostSelection(playerId);
+            
+            if (!ghostSelection) {
+                const playerName = player.name || player.nickname || `Player ${playerId.slice(-4)}`;
+                missing.push(playerName);
+            }
+        }
+        
+        return missing;
     }
 
     onPlayerJoin(callback) {
-        if (this.sdk && typeof this.sdk.onPlayerJoin === 'function') {
-            this.sdk.onPlayerJoin(callback);
+        const onPlayerJoinFunc = this.sdk?.onPlayerJoin || this.sdk?.default?.onPlayerJoin;
+        if (typeof onPlayerJoinFunc === 'function') {
+            onPlayerJoinFunc(callback);
         }
     }
 
     syncLocalPlayerState(localState = {}) {
         const me = this.getMyPlayer();
-        if (!me || typeof me.setState !== 'function') return;
+        if (!me) {
+            console.warn('[PlayroomService.syncLocalPlayerState] No player found');
+            return;
+        }
+        
+        if (typeof me.setState !== 'function') {
+            console.warn('[PlayroomService.syncLocalPlayerState] Player has no setState method');
+            return;
+        }
 
         const payload = {
             x: localState.x ?? 0,
@@ -194,8 +372,9 @@ class PlayroomService {
             const id = player.id || player.playerId || 'unknown';
             if (id === myId) continue;
 
+            // FIX: getState() requires a key argument. Use 'playerData' to get per-participant state
             const state = typeof player.getState === 'function'
-                ? (player.getState() || {})
+                ? (player.getState('playerData') || {})
                 : (player.state || {});
 
             const displayName = player.name
@@ -204,7 +383,7 @@ class PlayroomService {
                 || player.displayName
                 || `Player ${id.slice(-4)}`;
 
-            remotes.push({
+            const remoteData = {
                 id,
                 name: displayName,
                 x: state.x ?? 0,
@@ -212,15 +391,28 @@ class PlayroomService {
                 rotation: state.rotation ?? 0,
                 activeItem: state.activeItem || null,
                 flashlightOn: !!state.flashlightOn,
+                sanity: state.sanity ?? 100,
                 timestamp: state.timestamp || 0
-            });
+            };
+
+            remotes.push(remoteData);
         }
 
         return remotes;
     }
 
+    getAverageSanity(localSanity = 100) {
+        const remotes = this.getRemotePlayerStates();
+        const sanitySumWithLocal = remotes.reduce((sum, p) => sum + (p.sanity ?? 100), 0) + localSanity;
+        const totalPlayers = remotes.length + 1;
+        const averageSanity = sanitySumWithLocal / totalPlayers;
+        return averageSanity;
+    }
+
     requestDoorToggle(doorId) {
-        return this.sendHostRequest('doorToggle', { doorId });
+        // Use direct RPC broadcast instead of queuing to host
+        // This ensures instant synchronization for all players
+        return this.callRPC('toggleDoor', { doorId });
     }
 
     requestPickup(itemId) {
@@ -232,7 +424,9 @@ class PlayroomService {
     }
 
     requestLightToggle(switchId) {
-        return this.sendHostRequest('lightToggle', { switchId });
+        // Use direct RPC broadcast instead of queuing to host
+        // This ensures instant synchronization for all players
+        return this.callRPC('toggleLight', { switchId });
     }
 
     sendHostRequest(type, payload) {
@@ -245,13 +439,24 @@ class PlayroomService {
             timestamp: Date.now()
         };
 
-        if (this.sdk && typeof this.sdk.RPC === 'function') {
-            this.sdk.RPC('hostRequest', rpcPayload, { target: 'HOST' });
+        const RpcObj = this.sdk?.RPC || this.sdk?.default?.RPC;
+        const RpcFunc = this.sdk?.RPC || this.sdk?.default?.RPC;
+        const rpcFunc = this.sdk?.rpc || this.sdk?.default?.rpc;
+
+        // Prefer the same RPC API shape used everywhere else in this project.
+        // We broadcast the request and let only the host enqueue/process it.
+        if (RpcObj && RpcObj.call && typeof RpcObj.call === 'function') {
+            RpcObj.call('hostRequest', rpcPayload, RpcObj.Mode.ALL);
             return true;
         }
 
-        if (this.sdk && typeof this.sdk.rpc === 'function') {
-            this.sdk.rpc('hostRequest', rpcPayload, { target: 'HOST' });
+        if (typeof RpcFunc === 'function') {
+            RpcFunc('hostRequest', rpcPayload, { target: 'HOST' });
+            return true;
+        }
+
+        if (typeof rpcFunc === 'function') {
+            rpcFunc('hostRequest', rpcPayload, { target: 'HOST' });
             return true;
         }
 
@@ -261,27 +466,28 @@ class PlayroomService {
         }
 
         return false;
+     }
+
+    registerRPC(name, handler) {
+        if (!this.sdk && !this.sdk?.default) return;
+        
+        const RpcObj = this.sdk?.RPC || this.sdk?.default?.RPC;
+        if (RpcObj && RpcObj.register && typeof RpcObj.register === 'function') {
+            RpcObj.register(name, handler);
+        }
     }
 
-    bindRpcHandlers() {
-        if (!this.sdk || this.rpcBound) return;
-
-        if (typeof this.sdk.RPC === 'function') {
-            this.sdk.RPC('hostRequest', (packet) => {
-                if (!this.isHost()) return;
-                this.hostRequestQueue.push(packet);
-            });
-            this.rpcBound = true;
-            return;
+    callRPC(name, data, mode = 'ALL') {
+        if (!this.sdk && !this.sdk?.default) return false;
+        
+        const RpcObj = this.sdk?.RPC || this.sdk?.default?.RPC;
+        if (RpcObj && RpcObj.call && typeof RpcObj.call === 'function') {
+            // Convert mode string to RpcObj.Mode value
+            const rpcMode = RpcObj.Mode[mode] || RpcObj.Mode.ALL;
+            RpcObj.call(name, data, rpcMode);
+            return true;
         }
-
-        if (typeof this.sdk.rpc === 'function' && typeof this.sdk.onRPC === 'function') {
-            this.sdk.onRPC('hostRequest', (packet) => {
-                if (!this.isHost()) return;
-                this.hostRequestQueue.push(packet);
-            });
-            this.rpcBound = true;
-        }
+        return false;
     }
 
     drainHostRequests() {
@@ -291,57 +497,82 @@ class PlayroomService {
         return drained;
     }
 
-    registerRPC(name, handler) {
-        if (!this.sdk) return;
-        if (this.sdk.RPC && typeof this.sdk.RPC.register === 'function') {
-            this.sdk.RPC.register(name, handler);
-        }
-    }
-
-    callRPC(name, data) {
-        if (!this.sdk) return false;
-        if (this.sdk.RPC && typeof this.sdk.RPC.call === 'function') {
-            this.sdk.RPC.call(name, data, this.sdk.RPC.Mode.ALL);
-            return true;
-        }
-        return false;
-    }
-
     onState(key, handler) {
-        if (this.sdk && typeof this.sdk.onState === 'function') {
-            this.sdk.onState(key, handler);
+        const onStateFunc = this.sdk?.onState || this.sdk?.default?.onState;
+        if (typeof onStateFunc === 'function') {
+            onStateFunc(key, handler);
         }
     }
+
 
     setGlobalState(key, value) {
-        if (this.sdk && typeof this.sdk.setState === 'function') {
-            this.sdk.setState(key, value);
+        const setStateFunc = this.sdk?.setState || this.sdk?.default?.setState;
+        if (typeof setStateFunc === 'function') {
+            setStateFunc(key, value);
         } else {
             this.sharedState[key] = value;
         }
     }
 
     updateHostSharedState(partialState = {}) {
-        if (!this.isHost()) return this.sharedState;
+        if (!this.isHost()) {
+            return this.sharedState;
+        }
 
         this.sharedState = {
             ...this.sharedState,
             ...partialState
         };
 
-        if (this.sdk && typeof this.sdk.setState === 'function') {
-            this.sdk.setState('world', this.sharedState);
+        const setStateFunc = this.sdk?.setState || this.sdk?.default?.setState;
+        if (typeof setStateFunc === 'function') {
+            setStateFunc('world', this.sharedState);
+        } else {
+            console.warn('[PlayroomService.updateHostSharedState] setState function not found');
         }
 
         return this.sharedState;
     }
 
     getSharedState() {
-        if (this.sdk && typeof this.sdk.getState === 'function') {
-            const worldState = this.sdk.getState('world');
+        const getStateFunc = this.sdk?.getState || this.sdk?.default?.getState;
+        if (typeof getStateFunc === 'function') {
+            const worldState = getStateFunc('world');
             if (worldState) return worldState;
         }
         return this.sharedState;
+    }
+
+    bindRpcHandlers() {
+        if (this.rpcBound) {
+            return;
+        }
+
+        // Register RPC for handling host requests from clients
+        this.registerRPC('hostRequest', (data) => {
+            if (this.isHost() && this.hostRequestQueue) {
+                this.hostRequestQueue.push(data);
+            }
+        });
+
+        // Register RPC for ghost state updates
+        this.registerRPC('ghostUpdate', (data) => {
+            this.sharedState.ghost = data;
+        });
+
+        // Register RPC for hunt updates
+        this.registerRPC('huntUpdate', (data) => {
+            this.sharedState.hunts = data;
+        });
+
+        // Subscribe to global state changes
+        this.onState('world', (state) => {
+            if (state) {
+                this.sharedState = { ...state };
+            }
+        });
+
+        this.rpcBound = true;
     }
 
     getMyPlayerId() {
@@ -352,12 +583,16 @@ class PlayroomService {
 
     getRoomCodeFromSdk() {
         if (!this.sdk) return '';
-        if (typeof this.sdk.getRoomCode === 'function') return this.sdk.getRoomCode() || '';
+        
+        const getRoomCodeFunc = this.sdk.getRoomCode || this.sdk.default?.getRoomCode;
+        if (typeof getRoomCodeFunc === 'function') return getRoomCodeFunc() || '';
         if (typeof this.sdk.roomCode === 'string') return this.sdk.roomCode;
+        if (typeof this.sdk.default?.roomCode === 'string') return this.sdk.default.roomCode;
 
         const modeState = getModeState();
         return modeState.roomCode || '';
     }
 }
+
 
 export const playroomService = new PlayroomService();

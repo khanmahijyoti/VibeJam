@@ -1,4 +1,5 @@
 import { GAME_CONFIG } from '../config/gameConfig.js';
+import { playroomService } from '../services/PlayroomService.js';
 
 export class SanitySystem {
     constructor(scene) {
@@ -31,6 +32,31 @@ export class SanitySystem {
 
         this.scene.sanity = Phaser.Math.Clamp(this.scene.sanity - drainRate, 0, 100);
         this.scene.hud.setSanity(this.scene.sanity);
+    }
+
+    getAverageTeamSanity() {
+        if (!this.scene.isCoopMode) {
+            return this.scene.sanity;
+        }
+
+        const allPlayers = playroomService.getPlayers();
+        let totalSanity = 0;
+        let validPlayers = 0;
+
+        for (const playerState of allPlayers) {
+            const data = typeof playerState.getState === 'function'
+                ? playerState.getState('playerData')
+                : null;
+            const playerSanity = data && data.sanity !== undefined ? data.sanity : 100;
+            totalSanity += playerSanity;
+            validPlayers++;
+        }
+
+        if (validPlayers === 0) {
+            return this.scene.sanity;
+        }
+
+        return totalSanity / validPlayers;
     }
 
     getCurrentRoomName() {

@@ -27,7 +27,25 @@ export class StartScene extends Phaser.Scene {
         this.gameMode = getGameMode();
         this.isCoopMode = this.gameMode === GAME_MODES.COOP && playroomService.isReady();
 
+        console.log('[StartScene.create] Game initialization:', {
+            gameMode: this.gameMode,
+            isCoopMode: this.isCoopMode,
+            playroom: {
+                isReady: playroomService.isReady(),
+                initialized: playroomService.initialized,
+                sdkLoaded: !!playroomService.sdk
+            }
+        });
+
         if (this.isCoopMode) {
+            // Debug: Verify SDK is loaded
+            console.log('[StartScene] Co-op mode activated', {
+                isReady: playroomService.isReady(),
+                isHost: playroomService.isHost(),
+                sdkLoaded: !!playroomService.sdk,
+                roomCode: getRoomCode()
+            });
+
             if (playroomService.isHost()) {
                 const gameInit = {
                     ghostTypeIndex: Phaser.Math.Between(0, GHOST_TYPES.length - 1),
@@ -53,11 +71,13 @@ export class StartScene extends Phaser.Scene {
                 }
             }
         } else {
+            console.log('[StartScene.create] Single player mode');
             this.continueCreate(null);
         }
     }
 
     continueCreate(gameInit) {
+        this.playroomService = playroomService;
 
         this.roomWidth = GAME_CONFIG.world.width;
         this.roomHeight = GAME_CONFIG.world.height;
@@ -190,6 +210,33 @@ export class StartScene extends Phaser.Scene {
                 const isMe = playerState.id === playroomService.getMyPlayerId();
                 if (isMe) return;
 
+                // Check if lobby is full
+                const currentPlayerCount = playroomService.getPlayerCount();
+                const maxPlayers = playroomService.getMaxPlayers();
+
+                // Update lobby status text
+                const playerCountText = currentPlayerCount > maxPlayers ? 
+                    `CO-OP (${maxPlayers}/${maxPlayers} - LOBBY FULL!)` : 
+                    `CO-OP (${currentPlayerCount}/${maxPlayers})`;
+                if (this.coopDebugText) {
+                    this.coopDebugText.setText(playerCountText);
+                    // Flash red when full
+                    if (currentPlayerCount >= maxPlayers) {
+                        this.coopDebugText.setColor('#ff4444');
+                    } else {
+                        this.coopDebugText.setColor('#bdb5a4');
+                    }
+                }
+
+                // If the lobby is already at max capacity, warn and don't add the player
+                if (currentPlayerCount > maxPlayers) {
+                    console.warn('[StartScene.onPlayerJoin] Lobby full, rejecting player:', playerState.id);
+                    playerState.onQuit(() => {
+                        console.log('[StartScene.onPlayerJoin] Rejected player quit:', playerState.id);
+                    });
+                    return;
+                }
+
                 const startX = gameInit ? (820 + gameInit.spawnOffset) : 820;
                 const startY = 1130;
 
@@ -213,10 +260,18 @@ export class StartScene extends Phaser.Scene {
                         visuals.label.destroy();
                         delete this.playerSprites[playerState.id];
                     }
+                    
+                    // Update lobby status when player quits
+                    const newCount = playroomService.getPlayerCount();
+                    const newText = `CO-OP (${newCount}/${maxPlayers})`;
+                    if (this.coopDebugText) {
+                        this.coopDebugText.setText(newText);
+                        this.coopDebugText.setColor('#bdb5a4');
+                    }
                 });
             });
 
-            this.coopDebugText = this.add.text(20, 20, 'CO-OP', {
+            this.coopDebugText = this.add.text(20, 20, `CO-OP (1/${playroomService.getMaxPlayers()})`, {
                 fontFamily: 'monospace',
                 fontSize: '14px',
                 color: '#bdb5a4'
@@ -225,8 +280,20 @@ export class StartScene extends Phaser.Scene {
             // Register Direct RPCs for instant interactions
             playroomService.registerRPC('toggleDoor', (data) => {
                 const door = this.doorById.get(data.doorId);
-                if (door && !door.isLocked) {
-                    this.interactionSystem.applyDoorState(door, !door.isOpen, door.isLocked, { playSfx: true, animate: true });
+                const isMainExitDuringHunt = door
+                    && this.interactionSystem.isExitDoor(door)
+                    && (this.interactionSystem.huntModeActive || this.ghost?.state === 'HUNT');
+
+                if (door && !door.isLocked && !isMainExitDuringHunt) {
+                    // Toggle the door state
+                    const newState = !door.isOpen;
+                    this.interactionSystem.applyDoorState(door, newState, door.isLocked, { playSfx: true, animate: true });
+                    
+                    // Host updates the authoritative world state so late-joiners see the correct door state
+                    if (playroomService.isHost()) {
+                        const updatedState = this.buildAuthoritativeWorldState();
+                        playroomService.updateHostSharedState(updatedState);
+                    }
                 }
             });
 
@@ -235,25 +302,142 @@ export class StartScene extends Phaser.Scene {
                 if (sw) {
                     const room = this.rooms.find(r => r.name === sw.roomName && r.floorIndex === sw.floorIndex);
                     if (room) {
-                        this.interactionSystem.applySwitchState(sw, !room.isLit, { playSfx: true });
+                        // Toggle the light state
+                        const newLitState = !room.isLit;
+                        this.interactionSystem.applySwitchState(sw, newLitState, { playSfx: true });
+                        
+                        // Host updates the authoritative world state so late-joiners see the correct light state
+                        if (playroomService.isHost()) {
+                            const updatedState = this.buildAuthoritativeWorldState();
+                            playroomService.updateHostSharedState(updatedState);
+                        }
                     }
                 }
             });
 
             this.hud.setRoomCode(getRoomCode());
 
-            // Global State Equipment Sync
-            playroomService.onState('equipmentState', (newState) => {
-                if (!newState) return;
-                for (const [itemId, state] of Object.entries(newState)) {
-                    const pickup = this.pickupById.get(itemId);
-                    if (pickup && state.picked && !pickup.picked) {
-                        pickup.picked = true;
-                        if (pickup.visual) pickup.visual.setVisible(false);
-                        if (pickup.label) pickup.label.setVisible(false);
+            // Register RPC handler for equipment pickup notifications
+            playroomService.registerRPC('itemPickedUp', (data) => {
+                const pickup = this.pickupById.get(data.itemId);
+                if (pickup && !pickup.picked) {
+                    pickup.picked = true;
+                    if (pickup.visual) {
+                        pickup.visual.setVisible(false);
+                    }
+                    if (pickup.label) {
+                        pickup.label.setVisible(false);
+                    }
+                } else if (!pickup) {
+                    console.warn('[StartScene.itemPickedUp RPC] Pickup not found:', data.itemId);
+                }
+            });
+
+            // Register RPC handler for dropped items
+            playroomService.registerRPC('itemDropped', (data) => {
+                if (!data || !data.itemDef || !data.x || data.y === undefined || !data.networkId) {
+                    return;
+                }
+
+                const existingPickup = this.pickupById.get(data.networkId);
+                if (existingPickup) {
+                    existingPickup.x = data.x;
+                    existingPickup.y = data.y;
+                    existingPickup.floorIndex = data.floorIndex || 0;
+                    existingPickup.rotation = typeof data.itemDef.rotation === 'number' ? data.itemDef.rotation : existingPickup.rotation;
+                    existingPickup.itemDef = {
+                        id: data.itemDef.id,
+                        displayName: data.itemDef.displayName,
+                        flashlightOn: data.itemDef.id === 'flashlight' ? !!data.itemDef.flashlightOn : false,
+                        uvOn: data.itemDef.id === 'uv' ? !!data.itemDef.uvOn : false
+                    };
+                    existingPickup.picked = false;
+                    existingPickup.flashlightOn = existingPickup.itemDef.id === 'flashlight' ? existingPickup.itemDef.flashlightOn : false;
+                    existingPickup.uvOn = existingPickup.itemDef.id === 'uv' ? existingPickup.itemDef.uvOn : false;
+
+                    if (existingPickup.visual) {
+                        existingPickup.visual.setPosition(data.x, data.y);
+                        existingPickup.visual.setRotation(existingPickup.rotation);
+                        existingPickup.visual.floorIndex = existingPickup.floorIndex;
+                        existingPickup.visual.setVisible(existingPickup.floorIndex === this.currentFloorIndex);
+                    }
+
+                    if (existingPickup.label) {
+                        existingPickup.label.setPosition(data.x, data.y - 18);
+                        existingPickup.label.setText(existingPickup.itemDef.displayName);
+                        existingPickup.label.floorIndex = existingPickup.floorIndex;
+                        existingPickup.label.setVisible(existingPickup.floorIndex === this.currentFloorIndex);
+                    }
+
+                    return;
+                }
+                
+                // Create the pickup with the same networkId so all clients reference it consistently
+                const pickup = this.worldBuilder.createEquipmentPickup(
+                    data.x,
+                    data.y,
+                    data.itemDef,
+                    data.floorIndex || 0,
+                    data.networkId  // Pass the networkId so it doesn't generate a new one
+                );
+                
+                // Register the created pickup in the map so it can be found by subsequent RPC calls
+                if (pickup) {
+                    this.pickupById.set(data.networkId, pickup);
+                }
+            });
+
+            // Register RPC handler for hunt started events
+            playroomService.registerRPC('huntStarted', (data) => {
+                if (this.ghost && this.ghostController) {
+                    // Ensure hunt state is synchronized across all players
+                    this.ghost.state = 'HUNT';
+                    this.ghost.stateTimer = Phaser.Math.Between(15, 25);
+                    this.interactionSystem.setHuntMode(true);
+                    this.audioSystem.playSfx('hunt-start');
+                    this.audioSystem.playLoop('hunt-loop');
+                }
+            });
+
+            // Register RPC handler for ghost state updates from host
+            playroomService.registerRPC('ghostUpdate', (data) => {
+                if (!playroomService.isHost() && this.ghost && this.ghostController) {
+                    // Non-host clients receive ghost updates from the host
+                    this.ghost.x = data.x;
+                    this.ghost.y = data.y;
+                    this.ghost.state = data.state || this.ghost.state;
+                    this.ghost.floorIndex = data.floorIndex || this.ghost.floorIndex;
+                    this.ghost.huntCooldown = data.huntCooldown ?? this.ghost.huntCooldown;
+                    this.ghost.stateTimer = data.stateTimer ?? this.ghost.stateTimer;
+                    
+                    // Update the visual representation
+                    if (this.ghostController.ghostVisual) {
+                        this.ghostController.ghostVisual.setPosition(data.x, data.y);
                     }
                 }
             });
+
+            // Register RPC handler for player ghost selections
+            playroomService.registerRPC('playerGhostSelected', (data) => {
+                if (data && data.playerId && data.ghostName !== undefined) {
+                    if (data.ghostName) {
+                        playroomService.setPlayerGhostSelection(data.playerId, data.ghostName);
+                    } else {
+                        playroomService.playerGhostSelections.delete(data.playerId);
+                    }
+                }
+            });
+
+            // Register RPC handler for game end event (when host exits)
+            playroomService.registerRPC('gameEnded', (data) => {
+                this.showEndScreen();
+            });
+
+            this.hud.setRoomCode(getRoomCode());
+
+            // Bind PlayroomService request methods to this scene so InteractionSystem can call them
+            this.requestDoorToggle = (doorId) => playroomService.requestDoorToggle(doorId);
+            this.requestLightToggle = (switchId) => playroomService.requestLightToggle(switchId);
         }
     }
 
@@ -301,7 +485,12 @@ export class StartScene extends Phaser.Scene {
         this.walls.getChildren().forEach(w => toggleVisibility(w));
         this.doors.forEach(d => {
             toggleVisibility(d);
-            if (d.collider) d.collider.body.checkCollision.none = (d.floorIndex !== this.currentFloorIndex) || d.isOpen;
+            if (this.interactionSystem) {
+                this.interactionSystem.setDoorCollisionEnabled(
+                    d,
+                    d.floorIndex === this.currentFloorIndex && !d.isOpen
+                );
+            }
         });
         this.switches.forEach(s => toggleVisibility(s));
         this.furniture.forEach(f => toggleVisibility(f));
@@ -408,43 +597,63 @@ export class StartScene extends Phaser.Scene {
         this.playerController.update();
 
         if (this.isCoopMode) {
-            // --------------------------------------------------------
-            // 1. YOUR LOCAL MOVEMENT (Broadcasting to the network)
-            // --------------------------------------------------------
-            if (this.localPlayerSprite) {
-                const activeItem = this.inventory[this.activeSlot];
-                
-                // Pass everything to our throttled service
-                playroomService.syncLocalPlayerState({
-                    x: this.localPlayerSprite.x,
-                    y: this.localPlayerSprite.y,
-                    rotation: this.localPlayerSprite.rotation,
-                    activeItem: activeItem ? activeItem.id : null,
-                    flashlightOn: this.flashlightEnabled,
-                    sanity: this.sanity // Pass sanity here instead of calling setState separately!
-                });
+            if (playroomService.isHost()) {
+                this.processHostInteractionRequests();
+            }
+
+            if (!this._worldSyncFrame) this._worldSyncFrame = 0;
+            this._worldSyncFrame++;
+            if (this._worldSyncFrame % 30 === 0) {
+                this.applyAuthoritativeWorldState(playroomService.getSharedState(), { playSfx: false, animate: false });
             }
 
             // --------------------------------------------------------
-            // 2. REMOTE PLAYERS MOVEMENT (Reading from the network)
+            // 1. REMOTE PLAYERS MOVEMENT (Reading from the network)
             // --------------------------------------------------------
-            const allPlayers = playroomService.getPlayers();
-            allPlayers.forEach(playerState => {
-                if (playerState.id === playroomService.getMyPlayerId()) return;
+            const remoteStates = playroomService.getRemotePlayerStates();
+            
+            // Debug: Log remote states every 60 frames
+            if (!this._coopDebugFrame) this._coopDebugFrame = 0;
+            this._coopDebugFrame++;
+            if (this._coopDebugFrame % 60 === 0) {
+                console.log('[StartScene.update] Remote player states:', remoteStates.map(p => ({
+                    id: p.id,
+                    name: p.name,
+                    x: p.x,
+                    y: p.y,
+                    rot: p.rotation.toFixed(2)
+                })));
+            }
 
-                const sprite = this.playerSprites[playerState.id];
+            remoteStates.forEach(remoteState => {
+                const sprite = this.playerSprites[remoteState.id];
                 if (sprite) {
-                    // Read from the new combined 'playerData' key instead of 'position'
-                    const networkPos = typeof playerState.getState === 'function' 
-                        ? (playerState.getState('playerData') || {}) 
-                        : {};
-
-                    if (networkPos && typeof networkPos.x === 'number') {
-                        sprite.body.x = Phaser.Math.Linear(sprite.body.x, networkPos.x, 0.45);
-                        sprite.body.y = Phaser.Math.Linear(sprite.body.y, networkPos.y, 0.45);
+                    if (typeof remoteState.x === 'number') {
+                        sprite.body.x = Phaser.Math.Linear(sprite.body.x, remoteState.x, 0.45);
+                        sprite.body.y = Phaser.Math.Linear(sprite.body.y, remoteState.y, 0.45);
                         
-                        const rot = networkPos.rotation || 0;
+                        const rot = remoteState.rotation || 0;
                         sprite.dir.clear();
+                        
+                        // If remote player has flashlight on, render a flashlight cone
+                        if (remoteState.flashlightOn) {
+                            // Draw flashlight cone (simple triangle)
+                            sprite.dir.fillStyle(0xfff0a8, 0.3);
+                            sprite.dir.beginPath();
+                            sprite.dir.moveTo(sprite.body.x, sprite.body.y);
+                            const coneRange = 60; // Distance of light cone
+                            const coneWidth = 0.6; // FOV radians (~70 degrees)
+                            const x1 = sprite.body.x + Math.cos(rot - coneWidth / 2) * coneRange;
+                            const y1 = sprite.body.y + Math.sin(rot - coneWidth / 2) * coneRange;
+                            const x2 = sprite.body.x + Math.cos(rot + coneWidth / 2) * coneRange;
+                            const y2 = sprite.body.y + Math.sin(rot + coneWidth / 2) * coneRange;
+                            sprite.dir.lineTo(x1, y1);
+                            sprite.dir.lineTo(x2, y2);
+                            sprite.dir.closePath();
+                            sprite.dir.fillPath();
+                        }
+                        
+                        // Direction indicator line (always visible)
                         sprite.dir.lineStyle(2, 0x1f9ecc, 1);
                         sprite.dir.beginPath();
                         sprite.dir.moveTo(sprite.body.x, sprite.body.y);
@@ -456,6 +665,8 @@ export class StartScene extends Phaser.Scene {
 
                         sprite.label.setPosition(sprite.body.x, sprite.body.y - 20);
                     }
+                } else {
+                    console.warn('[StartScene.update] Remote player sprite not found for:', remoteState.id);
                 }
             });
 
@@ -478,6 +689,18 @@ export class StartScene extends Phaser.Scene {
         this.hud.layout(cam);
         this.sanitySystem.update();
         this.hud.setHuntActive(this.ghost && this.ghost.state === 'HUNT');
+
+        if (this.isCoopMode && this.localPlayerSprite) {
+            const activeItem = this.inventory[this.activeSlot];
+            playroomService.syncLocalPlayerState({
+                x: this.localPlayerSprite.x,
+                y: this.localPlayerSprite.y,
+                rotation: this.localPlayerSprite.rotation,
+                activeItem: activeItem ? activeItem.id : null,
+                flashlightOn: this.flashlightEnabled,
+                sanity: this.sanity
+            });
+        }
 
         this.ghostController.updateMovement();
 
@@ -521,24 +744,117 @@ export class StartScene extends Phaser.Scene {
 
     requestDoorToggle(doorId) {
         if (!this.isCoopMode || !doorId) return;
-        playroomService.callRPC('toggleDoor', { doorId });
+
+        if (!playroomService.isHost()) {
+            playroomService.requestDoorToggle(doorId);
+            return;
+        }
+
+        const door = this.doorById.get(doorId);
+        if (!door || door.isLocked) return;
+
+        this.interactionSystem.applyDoorState(door, !door.isOpen, door.isLocked, { playSfx: true, animate: true });
+        playroomService.updateHostSharedState(this.buildAuthoritativeWorldState());
+        playroomService.callRPC('toggleDoor', {
+            doorId,
+            isOpen: !!door.isOpen,
+            isLocked: !!door.isLocked
+        });
     }
 
     requestLightToggle(switchId) {
         if (!this.isCoopMode || !switchId) return;
-        playroomService.callRPC('toggleLight', { switchId });
+
+        if (!playroomService.isHost()) {
+            playroomService.requestLightToggle(switchId);
+            return;
+        }
+
+        const sw = this.switchById.get(switchId);
+        if (!sw) return;
+
+        const room = this.rooms.find(r => r.name === sw.roomName && r.floorIndex === sw.floorIndex);
+        if (!room) return;
+
+        this.interactionSystem.applySwitchState(sw, !room.isLit, { playSfx: true });
+        playroomService.updateHostSharedState(this.buildAuthoritativeWorldState());
+        playroomService.callRPC('toggleLight', {
+            switchId,
+            isLit: !!room.isLit
+        });
     }
 
     notifyPickup(networkId) {
-        if (!this.isCoopMode || !networkId) return;
-        const state = playroomService.getSharedState();
-        const equipmentState = state.equipmentState || {};
-        equipmentState[networkId] = { picked: true };
-        playroomService.setGlobalState('equipmentState', equipmentState);
+        if (!this.isCoopMode || !networkId) {
+            console.log('[notifyPickup] Skipping - isCoopMode:', this.isCoopMode, 'networkId:', networkId);
+            return;
+        }
+        
+        console.log('[notifyPickup] Broadcasting itemPickedUp RPC for networkId:', networkId);
+        // Broadcast to ALL players (including self) via RPC so everyone hides the item
+        playroomService.callRPC('itemPickedUp', { itemId: networkId }, 'ALL');
     }
 
-    // Deprecated for instant events
+    notifyDrop(itemData) {
+        if (!this.isCoopMode || !itemData) {
+            return;
+        }
+        
+        // Broadcast to ALL players (including self) via RPC so everyone sees the dropped item
+        playroomService.callRPC('itemDropped', itemData, 'ALL');
+    }
+
     processHostInteractionRequests() {
+        const requests = playroomService.drainHostRequests();
+        if (!requests.length) return;
+
+        let didChangeWorld = false;
+
+        for (const request of requests) {
+            if (!request || !request.type) continue;
+
+            if (request.type === 'doorToggle') {
+                const doorId = request.payload?.doorId;
+                const door = this.doorById.get(doorId);
+                if (!door || door.isLocked) {
+                    continue;
+                }
+
+                this.interactionSystem.applyDoorState(door, !door.isOpen, door.isLocked, { playSfx: true, animate: true });
+                playroomService.callRPC('toggleDoor', {
+                    doorId,
+                    isOpen: !!door.isOpen,
+                    isLocked: !!door.isLocked
+                });
+                didChangeWorld = true;
+                continue;
+            }
+
+            if (request.type === 'lightToggle') {
+                const switchId = request.payload?.switchId;
+                const sw = this.switchById.get(switchId);
+                if (!sw) {
+                    continue;
+                }
+
+                const room = this.rooms.find(r => r.name === sw.roomName && r.floorIndex === sw.floorIndex);
+                if (!room) {
+                    continue;
+                }
+
+                this.interactionSystem.applySwitchState(sw, !room.isLit, { playSfx: true });
+                playroomService.callRPC('toggleLight', {
+                    switchId,
+                    isLit: !!room.isLit
+                });
+                didChangeWorld = true;
+                continue;
+            }
+        }
+
+        if (didChangeWorld) {
+            playroomService.updateHostSharedState(this.buildAuthoritativeWorldState());
+        }
     }
 
     buildAuthoritativeWorldState() {
@@ -566,7 +882,7 @@ export class StartScene extends Phaser.Scene {
         return { doors, lights };
     }
 
-    applyAuthoritativeWorldState(worldState) {
+    applyAuthoritativeWorldState(worldState, options = {}) {
         if (!worldState) return;
 
         const doors = worldState.doors || {};
@@ -580,7 +896,10 @@ export class StartScene extends Phaser.Scene {
                 door,
                 !!doorState.isOpen,
                 !!doorState.isLocked,
-                { playSfx: true, animate: true }
+                {
+                    playSfx: options.playSfx !== false,
+                    animate: options.animate !== false
+                }
             );
         }
 
@@ -588,7 +907,9 @@ export class StartScene extends Phaser.Scene {
             const sw = this.switchById.get(switchId);
             if (!sw || !lightState) continue;
 
-            this.interactionSystem.applySwitchState(sw, !!lightState.isLit, { playSfx: true });
+            this.interactionSystem.applySwitchState(sw, !!lightState.isLit, {
+                playSfx: options.playSfx !== false
+            });
         }
     }
 
@@ -606,6 +927,15 @@ export class StartScene extends Phaser.Scene {
     }
 
     triggerEndGame() {
+        // In co-op mode, broadcast to all players
+        if (this.isCoopMode && playroomService.isHost()) {
+            playroomService.callRPC('gameEnded', {});
+        }
+        
+        this.showEndScreen();
+    }
+
+    showEndScreen() {
         this.isGameEnded = true;
         this.audioSystem.stopLoop('hunt-loop');
         this.audioSystem.stopLoop('emf-5-warning');
